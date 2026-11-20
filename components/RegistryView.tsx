@@ -1,10 +1,18 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DPIARecord, RiskLevel } from '../types';
 import { getRiskConfig } from '../utils/riskLogic';
+import { generateRegistryPdf } from '../utils/pdfExport';
+import {
+  RegistrySummaryDashboard,
+  RegistrySummaryStats,
+} from './RegistrySummaryDashboard';
 import {
   AlertTriangle,
+  Check,
   Copy,
+  Download,
   Eye,
+  FileDown,
   FilePlus2,
   Search,
   ShieldAlert,
@@ -31,21 +39,116 @@ export const RegistryView: React.FC<RegistryViewProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [riskFilter, setRiskFilter] = useState<RiskFilter>('ALL');
+  const [jsonExported, setJsonExported] = useState(false);
+  const [pdfExported, setPdfExported] = useState(false);
+  const jsonTimerRef = useRef<number | null>(null);
+  const pdfTimerRef = useRef<number | null>(null);
 
-  const stats = useMemo(() => {
+  useEffect(() => {
+    return () => {
+      if (jsonTimerRef.current !== null) window.clearTimeout(jsonTimerRef.current);
+      if (pdfTimerRef.current !== null) window.clearTimeout(pdfTimerRef.current);
+    };
+  }, []);
+
+  const stats: RegistrySummaryStats = useMemo(() => {
+    const total = records.length;
     const highCount = records.filter((r) => r.result.riskLevel === RiskLevel.HIGH).length;
+    const mediumCount = records.filter((r) => r.result.riskLevel === RiskLevel.MEDIUM).length;
+    const lowCount = records.filter((r) => r.result.riskLevel === RiskLevel.LOW).length;
     const mandatoryCount = records.filter((r) => r.result.dpiaMandatory).length;
-    const pendingActions = records.reduce(
-      (sum, r) => sum + Math.max(0, r.result.recommendations.length - r.checkedActionIds.length),
+
+    const totalResidualScore = records.reduce((sum, r) => sum + r.result.residualScore, 0);
+    const totalInherentScore = records.reduce((sum, r) => sum + r.result.inherentScore, 0);
+    const totalMitigationCredits = records.reduce(
+      (sum, r) => sum + r.result.mitigationCredits,
       0
     );
+
+    const avgResidualScore = total > 0 ? totalResidualScore / total : 0;
+    const avgInherentScore = total > 0 ? totalInherentScore / total : 0;
+    const avgMitigationCredits = total > 0 ? totalMitigationCredits / total : 0;
+
+    const avgRiskLevel =
+      avgResidualScore >= 9
+        ? RiskLevel.HIGH
+        : avgResidualScore >= 4
+        ? RiskLevel.MEDIUM
+        : RiskLevel.LOW;
+
+    const totalActions = records.reduce((sum, r) => sum + r.result.recommendations.length, 0);
+    const completedActions = records.reduce(
+      (sum, r) => sum + Math.min(r.checkedActionIds.length, r.result.recommendations.length),
+      0
+    );
+    const pendingActions = Math.max(0, totalActions - completedActions);
+
     return {
-      total: records.length,
+      total,
       highCount,
+      mediumCount,
+      lowCount,
+      highPct: total > 0 ? Math.round((highCount / total) * 100) : 0,
+      mediumPct: total > 0 ? Math.round((mediumCount / total) * 100) : 0,
+      lowPct: total > 0 ? Math.round((lowCount / total) * 100) : 0,
+      avgResidualScore,
+      avgInherentScore,
+      avgMitigationCredits,
+      avgRiskLevel,
       mandatoryCount,
+      mandatoryPct: total > 0 ? Math.round((mandatoryCount / total) * 100) : 0,
+      totalActions,
+      completedActions,
       pendingActions,
+      mitigationCompletionPct:
+        totalActions > 0 ? Math.round((completedActions / totalActions) * 100) : 0,
     };
   }, [records]);
+
+  const handleExportRegistryJson = () => {
+    if (records.length === 0) return;
+
+    const payload = {
+      exportType: 'enterprise-dpia-registry',
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      summary: {
+        totalAssessments: stats.total,
+        averageResidualScore: Number(stats.avgResidualScore.toFixed(2)),
+        averageInherentScore: Number(stats.avgInherentScore.toFixed(2)),
+        highResidualRisk: stats.highCount,
+        mediumResidualRisk: stats.mediumCount,
+        lowResidualRisk: stats.lowCount,
+        mandatoryDpiaCount: stats.mandatoryCount,
+        completedActions: stats.completedActions,
+        pendingActions: stats.pendingActions,
+      },
+      records,
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    const dateSlug = new Date().toISOString().slice(0, 10);
+    link.href = url;
+    link.download = `dpia-registry-${dateSlug}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+
+    setJsonExported(true);
+    if (jsonTimerRef.current !== null) window.clearTimeout(jsonTimerRef.current);
+    jsonTimerRef.current = window.setTimeout(() => setJsonExported(false), 2200);
+  };
+
+  const handleExportRegistryPdf = () => {
+    if (records.length === 0) return;
+
+    generateRegistryPdf(records);
+
+    setPdfExported(true);
+    if (pdfTimerRef.current !== null) window.clearTimeout(pdfTimerRef.current);
+    pdfTimerRef.current = window.setTimeout(() => setPdfExported(false), 2200);
+  };
 
   const filteredRecords = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -61,39 +164,66 @@ export const RegistryView: React.FC<RegistryViewProps> = ({
     });
   }, [records, riskFilter, searchQuery]);
 
+  const isExportDisabled = records.length === 0;
+
   return (
     <div className="space-y-6">
-      {/* Summary KPI Strip */}
-      <div className="bg-white border border-slate-200 rounded-lg grid grid-cols-2 lg:grid-cols-4 divide-y lg:divide-y-0 lg:divide-x divide-slate-200">
-        <div className="p-4 md:p-5">
-          <div className="text-xs font-medium text-slate-500">Registered Assessments</div>
-          <div className="text-2xl font-mono font-bold text-slate-900 tabular-nums mt-1">
-            {stats.total}
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">Active DPIA inventory</div>
+      {/* Registry Header & Bulk Export Actions */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-slate-900">DPIA Registry</h2>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {records.length === 0
+              ? 'No registered assessments available for export.'
+              : `Portfolio overview and complete inventory (${records.length} assessment${records.length === 1 ? '' : 's'}).`}
+          </p>
         </div>
-        <div className="p-4 md:p-5">
-          <div className="text-xs font-medium text-slate-500">High Residual Risk</div>
-          <div className="text-2xl font-mono font-bold text-red-700 tabular-nums mt-1">
-            {stats.highCount}
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">Require DPO approval</div>
-        </div>
-        <div className="p-4 md:p-5">
-          <div className="text-xs font-medium text-slate-500">Mandatory DPIA (Art. 35)</div>
-          <div className="text-2xl font-mono font-bold text-slate-900 tabular-nums mt-1">
-            {stats.mandatoryCount}
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">2+ WP248 criteria or Art. 35(3)</div>
-        </div>
-        <div className="p-4 md:p-5">
-          <div className="text-xs font-medium text-slate-500">Pending Actions</div>
-          <div className="text-2xl font-mono font-bold text-slate-900 tabular-nums mt-1">
-            {stats.pendingActions}
-          </div>
-          <div className="text-xs text-slate-500 mt-0.5">Open recommendations</div>
+
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleExportRegistryJson}
+            disabled={isExportDisabled}
+            title={
+              isExportDisabled
+                ? 'No assessments to export'
+                : `Export all ${records.length} assessments as JSON`
+            }
+            className="px-3 py-2 text-xs font-medium text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-white"
+          >
+            {jsonExported ? (
+              <Check size={14} className="text-emerald-600" />
+            ) : (
+              <Download size={14} />
+            )}
+            {jsonExported ? 'JSON Exported' : 'Export All (JSON)'}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleExportRegistryPdf}
+            disabled={isExportDisabled}
+            title={
+              isExportDisabled
+                ? 'No assessments to export'
+                : `Export all ${records.length} assessments as PDF`
+            }
+            className="px-3.5 py-2 text-xs font-semibold text-white bg-[#0F4C81] hover:bg-[#0c3c66] rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#0F4C81]"
+          >
+            {pdfExported ? <Check size={14} /> : <FileDown size={14} />}
+            {pdfExported ? 'PDF Exported' : 'Export All (PDF)'}
+          </button>
         </div>
       </div>
+
+      {/* Summary Dashboard */}
+      <RegistrySummaryDashboard
+        records={records}
+        stats={stats}
+        activeRiskFilter={riskFilter}
+        onSelectRiskFilter={setRiskFilter}
+        onViewReport={onViewReport}
+      />
 
       {/* Filter & Search Toolbar */}
       <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
